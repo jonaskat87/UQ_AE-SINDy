@@ -1,1 +1,0 @@
-# UQ_AE-SINDy
