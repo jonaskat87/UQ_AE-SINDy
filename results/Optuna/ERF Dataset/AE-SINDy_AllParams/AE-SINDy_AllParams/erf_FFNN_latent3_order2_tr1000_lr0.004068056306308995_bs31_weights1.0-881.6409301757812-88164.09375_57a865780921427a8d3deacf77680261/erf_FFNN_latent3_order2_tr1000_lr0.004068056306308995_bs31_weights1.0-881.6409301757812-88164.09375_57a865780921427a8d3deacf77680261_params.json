@@ -1,0 +1,23 @@
+{
+    "data_src": "erf",
+    "random_seed": 10,
+    "num_epochs": 1000,
+    "batch_size": 31,
+    "learning_rate": 0.004068056306308995,
+    "latent_dim": 3,
+    "poly_order": 2,
+    "lr_sched": true,
+    "patience": 50,
+    "tol": 1e-08,
+    "wd": 0.001,
+    "lambda1_metaweight": 0.7872411581560879,
+    "CNN": false,
+    "sequential_threshold_method": null,
+    "sequential_thresholding_interval": null,
+    "print_frequency": 1,
+    "emily_save": true,
+    "nipun_save": true,
+    "loss_weight_recon": 1.0,
+    "loss_weight_sindy_x": 88164.09375,
+    "loss_weight_sindy_z": 881.6409301757812
+}

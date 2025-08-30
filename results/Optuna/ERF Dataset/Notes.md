@@ -2,31 +2,8 @@
 
 The ERF dataset is the more "canonical" dataset, and attempts were made
 to make the Optuna tests more rigorous. The following parameters were 
-varied for each model.
+varied for AE-SINDy.
 
-## AE-AR
-```
-    lr = trial.suggest_float("lr", 1e-6, 1e-1, log=True)
-    batch_size = trial.suggest_int("batch_size", 4, 256)
-    layer1_size = trial.suggest_int("layer1_size", 20, 180)
-    layer2_size = trial.suggest_int("layer2_size", 20, 180)
-    layer3_size = trial.suggest_int("layer3_size", 20, 180)
-    w_dx = trial.suggest_float("w_dx", 0.1, 1.9)
-    w_dz = trial.suggest_float("w_dz", 0.1, 1.9)
-```
-
-## AE-NNdzdt
-```
-    lr = trial.suggest_float("lr", 1e-6, 1e-1, log=True)
-    batch_size = trial.suggest_int("batch_size", 4, 256)
-    layer1_size = trial.suggest_int("layer1_size", 20, 60)
-    layer2_size = trial.suggest_int("layer2_size", 20, 60)
-    layer3_size = trial.suggest_int("layer3_size", 20, 60)
-    lambda1_metaweight = trial.suggest_float("lambda1_metaweight", 0.50, 1.5)
-```
-
-
-## AE-SINDy
 The AE-SINDy model had two optuna studies. The first study, in `AE-SINDy_AllParams`
 had all the relevant parameters varied:
 ```
@@ -48,3 +25,5 @@ optimal combination to use. The parameters for the limited study were
 Similar parameters were found by both runs, which is promising for trusting Optuna, and for understanding the network.
 I suspect that increasing the dataset size will improve performance because the three networks seem to 
 be weak on the same runs.
+
+-Nipun Gunawardena
