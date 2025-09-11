@@ -11,11 +11,31 @@ The following can be run from the command line to generate Figures 2 and 3 in th
 * Figure 2: `python3 plotting_paper.py congestus_coal_200m_9600 -a SINDy -t '0 60' -m cv+20 -s full -g 7 289 404 -title n`
 * Figure 3: `python3 errors_all.py congestus_coal_200m_9600 -a SINDy -s nomass`
 
-As explained below, the results in Tables 1 and 2 are located in `ae_SINDy.out`. These results are outputs from the Slurm script `UQ/conformal/ae_SINDy_test.sh`.
+As explained below (under Directories -> UQ), the results in Tables 1 and 2 are located in `ae_SINDy.out`. These results are outputs from the Slurm script `UQ/conformal/ae_SINDy_test.sh`.
 
-## Dependencies
+## Requirements
 
+The following Python packages are required to run the scripts in this repository:
 
+```
+matplotlib==3.10.3
+numpy==2.2.5
+plotly==6.0.1
+PySDM==2.118
+PySDM_examples==2.118
+pysindy==1.7.5
+scipy==1.15.3
+torch==2.4.1
+xarray==2023.6.0
+dask==2024.1.1
+netCDF4==1.6.2
+```
+
+To install dependencies at once, create a `requirements.txt` file with the above contents and run: 
+
+```
+pip install -r requirements.txt
+```
 
 ## Directories 
 
