@@ -9,7 +9,9 @@ These files are part of a larger repository that will be released publicly as pa
 The following can be run from the command line to generate Figures 2 and 3 in the paper. The Python scripts have been written such that, after adjusting for the Python file location, they can be run from anywhere within the project.
 
 * Figure 2: `python3 plotting_paper.py congestus_coal_200m_9600 -a SINDy -t '0 60' -m cv+20 -s full -g 7 289 404 -title n`
+  * -> output saved as `results/UQ/conformal/ae_SINDy/congestus_coal_200m_9600_cv+20_full_7_289_404.pdf`
 * Figure 3: `python3 errors_all.py congestus_coal_200m_9600 -a SINDy -s nomass`
+  * -> output saved as `results/UQ/conformal/ae_SINDy/errors_congestus_coal_200m_9600_all_nomass.pdf`
 
 As explained below (under Directories -> UQ), the results in Tables 1 and 2 are located in `ae_SINDy.out`. These results are outputs from the Slurm script `UQ/conformal/ae_SINDy_test.sh`.
 
