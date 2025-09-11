@@ -25,5 +25,3 @@ optimal combination to use. The parameters for the limited study were
 Similar parameters were found by both runs, which is promising for trusting Optuna, and for understanding the network.
 I suspect that increasing the dataset size will improve performance because the three networks seem to 
 be weak on the same runs.
-
--Nipun Gunawardena
