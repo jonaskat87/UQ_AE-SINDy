@@ -105,13 +105,7 @@ python UQ/plotting_paper.py <dataset> -s latent -a SINDy -m full -t "0 10 20" --
 ## Verification
 
 All files have been syntax-checked with `python3 -m py_compile`:
-- ✓ `UQ/conformal/ae_SINDy.py`
-- ✓ `UQ/conformal/ae_SINDy_cv.py`
-- ✓ `UQ/conformal/cp_test.py`
-- ✓ `UQ/plotting_paper.py`
-
-## Future Enhancements
-
-- Visualization of ellipsoidal confidence regions in latent space plots
-- Optional GPU acceleration for Mahalanobis computation
-- Integration with other covariance estimators (e.g., Robust PCA, Graphical Lasso)
+- `UQ/conformal/ae_SINDy.py`
+- `UQ/conformal/ae_SINDy_cv.py`
+- `UQ/conformal/cp_test.py`
+- `UQ/plotting_paper.py`
