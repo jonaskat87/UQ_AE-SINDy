@@ -15,6 +15,29 @@ sys.path.append(parent_directory)  # parent_directory = ~/mphys-surrogate-model
 
 from src import data_utils as du
 
+def get_q_thresh(taus, alphas, alpha):
+    """Robustly access per-time threshold for given alpha.
+    
+    Args:
+        taus: either dict {alpha -> array(n,)} or ndarray shape (len(alphas), n)
+        alphas: list of alpha values
+        alpha: target alpha value
+    
+    Returns:
+        array shape (n,) of per-time thresholds
+    """
+    if isinstance(taus, dict):
+        return np.asarray(taus[alpha])
+    taus = np.asarray(taus)
+    if taus.ndim == 2:
+        # array indexed by alpha position
+        idx = list(alphas).index(alpha)
+        return taus[idx]
+    if taus.ndim == 1:
+        # already per-time thresholds (single alpha case)
+        return taus
+    raise ValueError(f"Unexpected taus shape: {taus.shape}")
+
 params = {
     "random_seed": 1952,
     "latent_dim": 3,
@@ -468,23 +491,40 @@ for i, alpha in enumerate(alphas):
             Sigma_inv = latent_maha.get("Sigma_inv")
             mu = latent_maha.get("mu")
             taus = latent_maha.get("taus")
-            # rep latent predictions come from DSD_bands[2][1]
-            rep = DSD_bands[2][1]
-            # get alpha_index corresponding to this alpha value
-            alpha_idx = list(alphas).index(alpha)
-            q_thresh = taus[alpha]  # shape (n,)
-            # compute Mahalanobis distance for each test sample and time
-            n = rep.shape[1]  # number of time steps
-            testing = np.zeros((N, n), dtype=bool)
-            for t in range(n):
-                Sinv_t = Sigma_inv[t]  # (d, d)
-                # residuals: predicted - actual
-                r_t = rep[:, t, :] - z_enc_test[:, t, :]  # (N, d)
-                # mahalanobis squared: (r @ Sinv) * r summed over dims
-                m2 = np.sum((r_t @ Sinv_t) * r_t, axis=1)
-                m = np.sqrt(np.maximum(m2, 0.0))
-                # For current alpha
-                testing[:, t] = m <= q_thresh[t]
+            # latent_maha expected keys: 'Sigma_inv' (n, d, d), 'mu' (n, d), and 'taus' (dict of alpha -> (n,))
+            # Prefer predicted latent encodings stored in the pickle (if present) for residuals.
+            z_enc_test_pred = latent_maha.get("z_enc_test_pred", None)
+            # get per-time inverse covariances / means / thresholds
+            Sigma_inv = latent_maha.get("Sigma_inv")
+            mu = latent_maha.get("mu")
+            taus = latent_maha.get("taus")
+            q_thresh = get_q_thresh(taus, alphas, alpha)  # shape (n,)
+
+            if z_enc_test_pred is not None:
+                # z_enc_test_pred expected shape: (N, n, d)
+                r_test = z_enc_test_pred - z_enc_test  # (N, n, d)
+                if mu is not None:
+                    # subtract per-time mean
+                    r_test = r_test - mu[None, :, :]
+                # vectorized Mahalanobis: scores_test shape (N, n)
+                scores_test = np.einsum("mnd,ndd,mnd->mn", r_test, Sigma_inv, r_test)
+                testing = scores_test <= q_thresh[None, :]
+            else:
+                # Fallback: use representative predicted latent trajectories from DSD_bands[2][1]
+                rep = DSD_bands[2][1]
+                n = rep.shape[1]  # number of time steps
+                testing = np.zeros((N, n), dtype=bool)
+                for t in range(n):
+                    Sinv_t = Sigma_inv[t]  # (d, d)
+                    # residuals: predicted - actual
+                    r_t = rep[:, t, :] - z_enc_test[:, t, :]  # (N, d)
+                    if mu is not None:
+                        r_t = r_t - mu[t]
+                    # mahalanobis squared: (r @ Sinv) * r summed over dims
+                    m2 = np.sum((r_t @ Sinv_t) * r_t, axis=1)
+                    m = np.sqrt(np.maximum(m2, 0.0))
+                    # For current alpha
+                    testing[:, t] = m <= q_thresh[t]
         else:
             testing = (z_enc_test >= lower[i]) & (z_enc_test <= upper[i])
     elif subset == "mass":
@@ -504,12 +544,15 @@ for i, alpha in enumerate(alphas):
             f"Standard deviation of percent of real test trajectories that fall within: {100*np.std(counter)}"
         )
     else:
+        # `counter` can be 1-D (e.g. latent: one value per time step) or 2-D
+        # (e.g. decoder/full: time x bins). Use a shape-agnostic reduction
+        # (mean/median/std over all elements) so both cases work.
         print(
-            f"Mean percent of real test trajectories that fall within: {100*np.mean(counter, axis=(0, 1))}"
+            f"Mean percent of real test trajectories that fall within: {100*np.mean(counter)}"
         )
         print(
-            f"Median percent of real test trajectories that fall within: {100*np.median(counter, axis=(0, 1))}"
+            f"Median percent of real test trajectories that fall within: {100*np.median(counter)}"
         )
         print(
-            f"Standard deviation of percent of real test trajectories that fall within: {100*np.std(counter, axis=(0, 1))}"
+            f"Standard deviation of percent of real test trajectories that fall within: {100*np.std(counter)}"
         )

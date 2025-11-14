@@ -451,6 +451,7 @@ if method == "full":
             for alpha in alphas:
                 taus[alpha] = np.quantile(scores, 1 - alpha, axis=0)  # (n,)
             latent_maha_full = {
+                "z_enc_test_pred": DSD_test_all[i],  # (N_test, n, latent_dim)
                 "Sigma_inv": Sigma_inv,
                 "mu": mu,
                 "taus": taus,
@@ -584,6 +585,7 @@ if method == "split":
             for alpha in alphas:
                 taus[alpha] = np.quantile(scores, 1 - alpha, axis=0)  # (n,)
             latent_maha_split = {
+                "z_enc_test_pred": DSD_test_all[i],  # (N_test, n, latent_dim)
                 "Sigma_inv": Sigma_inv,
                 "mu": mu,
                 "taus": taus,

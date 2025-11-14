@@ -473,6 +473,7 @@ def main():
             for alpha in alphas:
                 taus[alpha] = np.quantile(scores, 1 - alpha, axis=0)  # (n,)
             latent_maha_cv = {
+                "z_enc_test_pred": rep_DSD[i],  # (N_test, n, latent_dim)
                 "Sigma_inv": Sigma_inv,
                 "mu": mu,
                 "taus": taus,
