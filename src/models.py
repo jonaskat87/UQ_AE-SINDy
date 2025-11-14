@@ -1,199 +1,19 @@
-import numpy as np
 import torch
 from torch import nn
-from torch.nn import Conv1d, ConvTranspose1d
-from torch.nn import (
-    Linear,
-    ReLU,
-    Sigmoid,
-    ConstantPad1d,
-    Identity,
-    ELU,
-    Tanh,
-    Softmax,
-    SiLU,
-)
+from torch.nn import ELU, Identity, Linear, ReLU, Sigmoid, SiLU, Softmax
+
 from src import data_utils as du
-
-"""
-Convolutional NN Autoencoder; can operate on multiple channels of input (such as number and mass densities)
-"""
-
-
-class CNNEncoder(torch.nn.Module):
-    def __init__(self, n_channels=2, n_bins=35, n_latent=10):
-        super(CNNEncoder, self).__init__()
-        self.n_bins = n_bins
-        self.n_channels = n_channels
-        self.conv1 = Conv1d(
-            in_channels=n_channels,
-            out_channels=n_channels * 2,
-            kernel_size=4,
-            stride=2,
-            padding=1,
-        )
-        self.activation1 = ReLU()
-        self.conv2 = Conv1d(
-            in_channels=n_channels * 2,
-            out_channels=n_channels * 4,
-            kernel_size=4,
-            stride=2,
-            padding=1,
-        )
-        self.activation2 = ReLU()
-        self.conv3 = Conv1d(
-            in_channels=n_channels * 4,
-            out_channels=n_channels * 2,
-            kernel_size=4,
-            stride=2,
-            padding=1,
-        )
-        self.activation3 = ReLU()
-        self.lin1 = Linear(int(2 * n_channels * np.floor(n_bins / 8)), n_latent)
-
-        self.layers = [self.conv1, self.conv2, self.conv3, self.lin1]
-
-        torch.nn.init.kaiming_normal_(self.conv1.weight)
-        torch.nn.init.kaiming_normal_(self.conv2.weight)
-        torch.nn.init.kaiming_normal_(self.conv3.weight)
-
-    def forward(self, x):
-        n_bins = self.n_bins
-        x = self.conv1(x)
-        x = self.activation1(x)
-        x = self.conv2(x)
-        x = self.activation2(x)
-        x = self.conv3(x)
-        x = self.activation3(x)
-        x = x.view(-1, 1, int(2 * self.n_channels * np.floor(n_bins / 8)))
-        x = self.lin1(x)
-
-        return x
-
-    def get_weights(self):
-        weights = []
-        biases = []
-        for i, layer in enumerate(self.layers):
-            weights.append(layer.weight)
-            biases.append(layer.bias)
-
-        return (weights, biases)
-
-    def set_weights(self, weights, biases):
-        for i, layer in enumerate(self.layers):
-            layer.weight.data = weights[i]
-            layer.bias.data = biases[i]
-
-
-class CNNDecoder(torch.nn.Module):
-    def __init__(self, n_channels=2, n_bins=100, n_latent=10, distribution=False):
-        super(CNNDecoder, self).__init__()
-
-        self.n_latent = n_latent
-        self.n_channels = n_channels
-        self.n_bins = n_bins
-
-        self.n_bins = n_bins
-        self.lin = Linear(n_latent, int(2 * n_channels * np.floor(n_bins / 8)))
-        self.conv1 = ConvTranspose1d(
-            in_channels=n_channels * 2,
-            out_channels=n_channels * 4,
-            kernel_size=4,
-            stride=2,
-            padding=1,
-        )
-        self.activation1 = ReLU()
-        self.constantpad1d1 = ConstantPad1d((1, 0), 0)
-        self.conv2 = ConvTranspose1d(
-            in_channels=n_channels * 4,
-            out_channels=n_channels * 2,
-            kernel_size=4,
-            stride=2,
-            padding=1,
-        )
-        self.activation2 = ReLU()
-        self.conv3 = ConvTranspose1d(
-            in_channels=n_channels * 2,
-            out_channels=n_channels,
-            kernel_size=4,
-            stride=2,
-            padding=1,
-        )
-        self.activation3 = ReLU()
-        self.lin2 = Linear(n_bins, n_bins)
-        if distribution:
-            self.activation4 = Softmax(dim=2)
-        else:
-            self.activation4 = Sigmoid()
-
-        self.layers = [self.lin, self.conv1, self.conv2, self.conv3, self.lin2]
-
-        torch.nn.init.kaiming_normal_(self.conv1.weight)
-        torch.nn.init.kaiming_normal_(self.conv2.weight)
-        torch.nn.init.kaiming_normal_(self.conv3.weight)
-
-    def forward(self, x):
-        inp = x
-        x = self.lin(inp)
-        x = x.reshape(-1, self.n_channels * 2, int(np.floor(self.n_bins / 8)))
-        x = self.conv1(x)
-        x = self.activation1(x)
-        if self.n_bins % 8 != 0:
-            x = self.constantpad1d1(x)
-        x = self.conv2(x)
-        x = self.activation2(x)
-        if self.n_bins % 8 != 0:
-            x = self.constantpad1d1(x)
-        x = self.conv3(x)
-        x = self.activation3(x)
-        if self.n_bins % 8 != 0:
-            x = self.constantpad1d1(x)
-        x = self.lin2(x)
-        x = self.activation4(x)
-
-        return x
-
-    def get_weights(self):
-        weights = []
-        biases = []
-        for i, layer in enumerate(self.layers):
-            weights.append(layer.weight)
-            biases.append(layer.bias)
-
-        return (weights, biases)
-
-    def set_weights(self, weights, biases):
-        for i, layer in enumerate(self.layers):
-            layer.weight.data = weights[i]
-            layer.bias.data = biases[i]
-
-
-class CNNAutoEncoder(torch.nn.Module):
-    def __init__(self, n_channels=2, n_bins=100, n_latent=10):
-        super(CNNAutoEncoder, self).__init__()
-
-        self.encoder = CNNEncoder(
-            n_channels=n_channels, n_bins=n_bins, n_latent=n_latent
-        )
-        self.decoder = CNNDecoder(
-            n_channels=n_channels, n_bins=n_bins, n_latent=n_latent
-        )
-
-    def forward(self, x):
-        latent = self.encoder(x)
-
-        reconstruction = self.decoder(latent)
-
-        return reconstruction
-
-
-"""
-Feed-forward neural network autoencoder
-"""
 
 
 class FFNNEncoder(torch.nn.Module):
     def __init__(self, n_bins=64, n_latent=3):
+        """
+        Pytorch model for the feed-forward neural network encoder part of an
+        autoencoder. Used in multiple other models.
+
+        :param n_bins: Number of bins for the droplet size distributions
+        :param n_latent: Number of latent variables
+        """
         super(FFNNEncoder, self).__init__()
         self.n_bins = n_bins
         self.layer1 = Linear(n_bins, int(n_bins / 2))
@@ -250,6 +70,16 @@ class FFNNEncoder(torch.nn.Module):
 
 class FFNNDecoder(torch.nn.Module):
     def __init__(self, n_bins=64, n_latent=3, distribution=True):
+        """
+        Pytorch model for the feed-forward neural network decoder part of an
+        autoencoder. Used in multiple other models.
+
+        :param n_bins: Number of bins for the droplet size distributions
+        :param n_latent: Number of latent variables
+        :param distribution: Flag to indicate whether output is a true
+                             distribution (area under curve is 1) or
+                             not normalized.
+        """
         super(FFNNDecoder, self).__init__()
 
         self.n_bins = n_bins
@@ -310,6 +140,12 @@ class FFNNDecoder(torch.nn.Module):
 
 class FFNNAutoEncoder(torch.nn.Module):
     def __init__(self, n_bins=100, n_latent=10):
+        """
+        Combines FFNNEncoder and FFNNDecoder into a single autoencoder model
+
+        :param n_bins: Number of bins for the droplet size distributions
+        :param n_latent: Number of latent variables
+        """
         super(FFNNAutoEncoder, self).__init__()
 
         self.encoder = FFNNEncoder(n_bins=n_bins, n_latent=n_latent)
@@ -322,13 +158,17 @@ class FFNNAutoEncoder(torch.nn.Module):
         return reconstruction
 
 
-"""
-Pseudo-SINDy network for time derivatives
-"""
-
-
 class SINDyDeriv(torch.nn.Module):
     def __init__(self, n_latent=10, poly_order=2, use_thresholds=False):
+        """
+        Pytorch SINDy model that is to be paired with autoencoder. Works directly
+        from latent variables.
+
+        :param n_latent: Number of latent variables
+        :param poly_order: SINDy polynomial order, should typically be 2 or 3
+        :param use_thresholds: Flag to indicate whether coefficients are thresholded
+                               during training.
+        """
         super(SINDyDeriv, self).__init__()
         self.library_size = du.library_size(n_latent, poly_order)
         self.n_latent = n_latent
@@ -368,13 +208,18 @@ class SINDyDeriv(torch.nn.Module):
         self.sindy_coeffs.weight.data = self.mask * self.sindy_coeffs.weight.data
 
 
-"""
-Black-box network for predicting time derivatives
-"""
-
-
 class NNDerivatives(torch.nn.Module):
     def __init__(self, n_latent=3, layer_size=None):
+        """
+        Pytorch black box model to predict time derivatives directly  of droplet
+        size distributions directly (while SINDy predicts a simplified equation form
+        of time derivatives). Paired with autoencoder.
+
+        :param n_latent: Number of latent variables
+        :param layer_size: Number of layers and sizes used in network, e.g. [40, 45, 35]
+                           is a three layer network with 40, 45, and 35 nodes for each
+                           hidden layer.
+        """
         super(NNDerivatives, self).__init__()
         self.n_latent = n_latent
         if layer_size is None:
@@ -441,13 +286,18 @@ class NNDerivatives(torch.nn.Module):
                     nn.init.constant_(module.bias, 0.0)
 
 
-"""
-Black-box network for predicting states
-"""
-
-
 class Autoregressive(torch.nn.Module):
     def __init__(self, n_bins=3, n_bins_in=None, layer_size=None):
+        """
+        Pytorch model to predict the next droplet size distribution time step directly.
+        SINDy and dzdt predict time derivatives of droplet size dsitributions, whereas
+        this model is an autoregressive model that only works with the DSDs. Paired
+        with autoencoder.
+
+        :param n_bins:
+        :param n_bins_in:
+        :param layer_size:
+        """
         super(Autoregressive, self).__init__()
         self.n_bins = n_bins
         if layer_size is None:
@@ -493,27 +343,11 @@ class Autoregressive(torch.nn.Module):
                 torch.nn.init.zeros_(m.bias)
 
 
-"""
-Utility functions
-"""
-
-
-def get_latent_var(model, dataloader, device, n_latent):
-    dataset = dataloader.dataset
-    latents = np.zeros((len(dataset), n_latent))
-
-    jj = 0
-    for data in dataloader:
-        bin0 = data
-        bin0 = bin0.to(device)
-        latent = model.encoder(bin0.float())
-        bs = latent.shape[0]
-
-        latents[jj : jj + bs, :] = latent.detach().cpu().numpy().reshape(bs, n_latent)
-        jj += bs
-
-    return latents
-
-
 def count_parameters(model):
+    """
+    Count the number of parameters in a model
+
+    :param model: Pytorch model
+    :return: Number of parameters
+    """
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

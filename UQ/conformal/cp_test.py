@@ -50,7 +50,19 @@ parser.add_argument(
     required=True,
     help="which conformal predictions to plot (required): full, split[p], or cv+[k]",
 )
+parser.add_argument(
+    "-e", "--epochs", type=int, default=100, help="training epochs (default 100)"
+)
+parser.add_argument(
+    "-b", "--batches", type=int, default=200, help="batch size (default 200)"
+)
 args = parser.parse_args()
+
+# Respect CLI overrides for training size
+params.update({
+    "num_epochs": args.epochs,
+    "batch_size": args.batches,
+})
 
 method = args.method
 calib_size = None
@@ -77,7 +89,16 @@ pickle_path = os.path.join(
     cp_results_file,
 )
 with open(pickle_path, "rb") as f:
-    alphas, test_size, _, DSD_bands, m_bands = pickle.load(f)
+    data = pickle.load(f)
+
+# Support old format (5 elements) and new format with latent Mahalanobis info (6 elements)
+if isinstance(data, (list, tuple)) and len(data) == 5:
+    alphas, test_size, _, DSD_bands, m_bands = data
+    latent_maha = None
+elif isinstance(data, (list, tuple)) and len(data) >= 6:
+    alphas, test_size, _, DSD_bands, m_bands, latent_maha = data[:6]
+else:
+    raise ValueError("Unrecognized conformal results file format")
 
 # load data
 if calib_size:
@@ -441,7 +462,31 @@ for i, alpha in enumerate(alphas):
     print(f"testing for coverage 1-alpha={100*(1-alpha)}%")
     # test if it falls within the bands
     if subset == "latent":
-        testing = (z_enc_test >= lower[i]) & (z_enc_test <= upper[i])
+        # If latent Mahalanobis info is present, evaluate ellipsoidal coverage
+        if latent_maha is not None:
+            # latent_maha expected keys: 'Sigma_inv' (n, d, d), 'mu' (n, d), and 'taus' (dict of alpha -> (n,))
+            Sigma_inv = latent_maha.get("Sigma_inv")
+            mu = latent_maha.get("mu")
+            taus = latent_maha.get("taus")
+            # rep latent predictions come from DSD_bands[2][1]
+            rep = DSD_bands[2][1]
+            # get alpha_index corresponding to this alpha value
+            alpha_idx = list(alphas).index(alpha)
+            q_thresh = taus[alpha]  # shape (n,)
+            # compute Mahalanobis distance for each test sample and time
+            n = rep.shape[1]  # number of time steps
+            testing = np.zeros((N, n), dtype=bool)
+            for t in range(n):
+                Sinv_t = Sigma_inv[t]  # (d, d)
+                # residuals: predicted - actual
+                r_t = rep[:, t, :] - z_enc_test[:, t, :]  # (N, d)
+                # mahalanobis squared: (r @ Sinv) * r summed over dims
+                m2 = np.sum((r_t @ Sinv_t) * r_t, axis=1)
+                m = np.sqrt(np.maximum(m2, 0.0))
+                # For current alpha
+                testing[:, t] = m <= q_thresh[t]
+        else:
+            testing = (z_enc_test >= lower[i]) & (z_enc_test <= upper[i])
     elif subset == "mass":
         testing = (outputs["m_test"] >= lower[i]) & (outputs["m_test"] <= upper[i])
     else:

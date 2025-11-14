@@ -79,7 +79,16 @@ for method in methods:
         cp_results_file,
     )
     with open(pickle_path, "rb") as f:
-        alphas, test_size, _, DSD_bands, m_bands = pickle.load(f)
+        data = pickle.load(f)
+
+    # Support old format (5 elements) and new format with latent Mahalanobis info (6 elements)
+    if isinstance(data, (list, tuple)) and len(data) == 5:
+        alphas, test_size, _, DSD_bands, m_bands = data
+        latent_maha = None
+    elif isinstance(data, (list, tuple)) and len(data) >= 6:
+        alphas, test_size, _, DSD_bands, m_bands, latent_maha = data[:6]
+    else:
+        raise ValueError("Unrecognized conformal results file format")
 
     """
     First dim for these three below corresponds to architecture (in this order):
@@ -148,10 +157,11 @@ elif args.subset == "all":
 )
 arch_labels = ["reconstruction", "latent dynamics", "end-to-end", "mass"]
 
-# grab colors from matplotlib default cycle
-prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+# grab colors from matplotlib TABLEAU color palette
+import matplotlib.colors as mcolors
+colors = list(mcolors.TABLEAU_COLORS.values())
 alpha_colors = {
-    alpha: prop_cycle[i % len(prop_cycle)] for i, alpha in enumerate(alphas)
+    alpha: colors[i % len(colors)] for i, alpha in enumerate(alphas)
 }
 
 # linestyles for CP methods

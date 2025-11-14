@@ -109,7 +109,16 @@ pickle_path = os.path.join(
     cp_results_file,
 )
 with open(pickle_path, "rb") as f:
-    alphas, test_size, _, DSD_bands, m_bands = pickle.load(f)
+    data = pickle.load(f)
+
+# Support old format (5 elements) and new format with latent Mahalanobis info (6 elements)
+if isinstance(data, (list, tuple)) and len(data) == 5:
+    alphas, test_size, _, DSD_bands, m_bands = data
+    latent_maha = None
+elif isinstance(data, (list, tuple)) and len(data) >= 6:
+    alphas, test_size, _, DSD_bands, m_bands, latent_maha = data[:6]
+else:
+    raise ValueError("Unrecognized conformal results file format")
 
 # load data
 if calib_size:
@@ -148,7 +157,8 @@ ids_rel_to_test = [pos_map[a] for a in ids]
 tplt = np.fromstring(args.tplt, dtype=int, sep=" ")
 subset = args.subset
 
-colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
+import matplotlib.colors as mcolors
+colors = list(mcolors.TABLEAU_COLORS.values())
 
 if subset == "decoder":
     lower = DSD_bands[0][0]
@@ -496,7 +506,7 @@ if subset == "latent":
                     lower[k_alpha, id, :, j],
                     upper[k_alpha, id, :, j],
                     color=colors[k_alpha],
-                    alpha=0.8,
+                    alpha=0.4,
                     label=f"{100*(1-alpha)}% coverage",
                 )
             ax[j][i].plot(
@@ -536,7 +546,7 @@ elif subset == "mass":
                 np.maximum(0, lower[k_alpha, id]),
                 upper[k_alpha, id],
                 color=colors[k_alpha],
-                alpha=0.8,
+                alpha=0.4,
                 label=f"{100*(1-alpha)}% coverage",
             )
         ax[i].plot(
@@ -576,7 +586,7 @@ else:
                     upper[k_alpha, id, t],
                     step="pre",
                     color=colors[k_alpha],
-                    alpha=0.8,
+                    alpha=0.4,
                     label=f"{100*(1-alpha)}% coverage",
                 )
             ax[j][i].plot(
@@ -591,8 +601,8 @@ else:
                 bin_mids,
                 rep[id, t],
                 label="Model",
-                color="black",
-                linestyle="dashed",
+                color="gainsboro",
+                linestyle="solid",
                 linewidth=1.5,
             )  # representative band
             ax[j][i].set_xscale("log")

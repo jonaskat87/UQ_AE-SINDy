@@ -9,6 +9,8 @@ import torch
 import time
 from pathlib import Path
 import pickle
+from sklearn.covariance import LedoitWolf
+from joblib import Parallel, delayed
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.append(project_root)
@@ -47,6 +49,9 @@ parser.add_argument(
     type=float,
     default=0.1,
     help="miscoverage rate(s), must be between 0 and 1, default is 0.1",
+)
+parser.add_argument(
+    "-n", "--n_jobs", type=int, default=1, help="number of parallel jobs for Mahalanobis computation (default is 1)"
 )
 args = parser.parse_args()
 
@@ -211,6 +216,25 @@ params["loss_weight_sindy_z"] = lambda2
 """
 Helper utility functions
 """
+
+
+def compute_scores_and_inv(res_t):
+    """Compute Mahalanobis distance scores and inverse covariance matrix.
+    
+    Args:
+        res_t: residuals at a fixed time t, shape (m, d) where m=samples, d=dimensions
+    
+    Returns:
+        scores_t: Mahalanobis distance scores, shape (m,)
+        Sigma_inv: Inverse covariance matrix, shape (d, d)
+        mu_t: Mean of residuals, shape (d,)
+    """
+    mu_t = res_t.mean(axis=0, keepdims=True)  # (1, d)
+    res_c = res_t - mu_t  # center residuals
+    lw = LedoitWolf().fit(res_c)  # covariance of centered residuals
+    Sigma_inv = lw.precision_
+    scores_t = np.einsum("mi,ij,mi->m", res_c, Sigma_inv, res_c)
+    return scores_t, Sigma_inv, mu_t.squeeze(0)
 
 
 # this helper utility encodes and then decodes each DSD to test how close the predictions are to the actual values
@@ -401,6 +425,7 @@ if method == "full":
         x=outputs["x_test"], m=outputs["m_test"], model=best_model
     )
     print("Running vanilla conformal predictions.")
+    latent_maha_full = None  # Will be set if using latent space with Mahalanobis
     for i in range(3):  # loop through different subsets of the architecture
         if (
             i == 1
@@ -409,6 +434,27 @@ if method == "full":
                 DSD_train_all[i]
                 - best_model.encoder(torch.Tensor(outputs["x_train"])).detach().numpy()
             )
+            # Compute Mahalanobis distance-based conformal scores for latent space
+            z_train_enc = best_model.encoder(torch.Tensor(outputs["x_train"])).detach().numpy()
+            residuals_lat = DSD_train_all[i] - z_train_enc  # (m, n, d)
+            m, n, d = residuals_lat.shape
+            print("Computing Mahalanobis distance metrics for latent space...")
+            results = Parallel(n_jobs=args.n_jobs)(
+                delayed(compute_scores_and_inv)(residuals_lat[:, t, :]) for t in range(n)
+            )
+            scores_list, Sigma_inv_list, mu_list = zip(*results)
+            scores = np.stack(scores_list, axis=1)  # (m, n)
+            Sigma_inv = np.stack(Sigma_inv_list, axis=0)  # (n, d, d)
+            mu = np.stack(mu_list, axis=0)  # (n, d)
+            # Compute quantiles of Mahalanobis scores for each alpha and time
+            taus = {}
+            for alpha in alphas:
+                taus[alpha] = np.quantile(scores, 1 - alpha, axis=0)  # (n,)
+            latent_maha_full = {
+                "Sigma_inv": Sigma_inv,
+                "mu": mu,
+                "taus": taus,
+            }
         else:
             DSD_res_signed = DSD_train_all[i] - outputs["x_train"]
         DSD_q_low, DSD_q_high = one_sided_quantiles(
@@ -431,6 +477,7 @@ if method == "full":
     lower_m = M_lower_full
     upper_m = M_upper_full
     rep_m = M_test_all
+    latent_maha = latent_maha_full
 
 if method == "split":
     # 0) configure data and dataloaders
@@ -511,6 +558,7 @@ if method == "split":
         x=outputs["x_test"], m=outputs["m_test"], model=best_model
     )
     print("Running split conformal predictions.")
+    latent_maha_split = None  # Will be set if using latent space with Mahalanobis
     for i in range(3):  # loop through different subsets of the architecture
         if (
             i == 1
@@ -519,6 +567,27 @@ if method == "split":
                 DSD_calib_all[i]
                 - best_model.encoder(torch.Tensor(outputs["x_calib"])).detach().numpy()
             )
+            # Compute Mahalanobis distance-based conformal scores for latent space
+            z_calib_enc = best_model.encoder(torch.Tensor(outputs["x_calib"])).detach().numpy()
+            residuals_lat = DSD_calib_all[i] - z_calib_enc  # (m, n, d)
+            m, n, d = residuals_lat.shape
+            print("Computing Mahalanobis distance metrics for latent space...")
+            results = Parallel(n_jobs=args.n_jobs)(
+                delayed(compute_scores_and_inv)(residuals_lat[:, t, :]) for t in range(n)
+            )
+            scores_list, Sigma_inv_list, mu_list = zip(*results)
+            scores = np.stack(scores_list, axis=1)  # (m, n)
+            Sigma_inv = np.stack(Sigma_inv_list, axis=0)  # (n, d, d)
+            mu = np.stack(mu_list, axis=0)  # (n, d)
+            # Compute quantiles of Mahalanobis scores for each alpha and time
+            taus = {}
+            for alpha in alphas:
+                taus[alpha] = np.quantile(scores, 1 - alpha, axis=0)  # (n,)
+            latent_maha_split = {
+                "Sigma_inv": Sigma_inv,
+                "mu": mu,
+                "taus": taus,
+            }
         else:
             DSD_res_signed = DSD_calib_all[i] - outputs["x_calib"]
         DSD_q_low, DSD_q_high = one_sided_quantiles(
@@ -541,6 +610,7 @@ if method == "split":
     lower_m = M_lower_full
     upper_m = M_upper_full
     rep_m = M_test_all
+    latent_maha = latent_maha_split
 
 """
 Save:
@@ -566,6 +636,7 @@ with open(
             outputs["idx_test"],
             (lower, upper, rep_DSD),
             (lower_m, upper_m, rep_m),
+            latent_maha,  # NEW: Include Mahalanobis metrics for latent space
         ],
         f,
     )

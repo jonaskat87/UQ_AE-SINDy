@@ -21,7 +21,7 @@ echo 'activating'
 . python.sh
 cd mphys-surrogate-model
 
-# echo 'testing vanilla cp'
+echo 'testing vanilla cp'
 python3 UQ/conformal/cp_test.py congestus_coal_200m_9600 -a SINDy -m full -s decoder
 python3 UQ/conformal/cp_test.py congestus_coal_200m_9600 -a SINDy -m full -s latent
 python3 UQ/conformal/cp_test.py congestus_coal_200m_9600 -a SINDy -m full -s full

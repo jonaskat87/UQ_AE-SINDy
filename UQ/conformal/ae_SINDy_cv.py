@@ -4,6 +4,8 @@ import argparse
 import pickle
 import numpy as np
 import torch
+from sklearn.covariance import LedoitWolf
+from joblib import Parallel, delayed
 
 # --- MPI / threading commands must come before any torch.* or numpy.* calls ---
 # Force single‐threading in BLAS libs
@@ -28,6 +30,38 @@ from src import data_utils as du
 from training_scripts import train_ae_sindy as train
 from src import thresholding, training
 
+
+def _init_worker():
+    """Initializer for worker processes: set environment and torch thread limits early.
+
+    This runs once in each worker process before any tasks are executed, avoiding
+    calls to set_num_interop_threads after parallel runtime has started.
+    """
+    try:
+        import os
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_THREADING_LAYER", "GNU")
+    except Exception:
+        pass
+    try:
+        # Import torch locally inside worker initializer; if unavailable, skip thread tuning
+        import importlib
+
+        torch = importlib.import_module("torch")
+        try:
+            torch.set_num_threads(1)
+        except Exception:
+            pass
+        try:
+            torch.set_num_interop_threads(1)
+        except Exception:
+            pass
+    except Exception:
+        # Torch might not be importable in some lightweight test environments; ignore
+        pass
+
 parser = argparse.ArgumentParser(description="cv+ conformal for AE-SINDy")
 parser.add_argument("data_name", help="basename (no .nc) of your dataset")
 parser.add_argument(
@@ -46,6 +80,9 @@ parser.add_argument(
     type=float,
     default=[0.1],
     help="miscoverage rate(s); list of values in (0,1)",
+)
+parser.add_argument(
+    "-n", "--n_jobs", type=int, default=1, help="number of parallel jobs for Mahalanobis computation (default 1)"
 )
 args = parser.parse_args()
 
@@ -141,6 +178,25 @@ def init_scheduler(opt):
     return torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min")
 
 
+def compute_scores_and_inv(res_t):
+    """Compute Mahalanobis distance scores and inverse covariance matrix.
+    
+    Args:
+        res_t: residuals at a fixed time t, shape (m, d) where m=samples, d=dimensions
+    
+    Returns:
+        scores_t: Mahalanobis distance scores, shape (m,)
+        Sigma_inv: Inverse covariance matrix, shape (d, d)
+        mu_t: Mean of residuals, shape (d,)
+    """
+    mu_t = res_t.mean(axis=0, keepdims=True)  # (1, d)
+    res_c = res_t - mu_t  # center residuals
+    lw = LedoitWolf().fit(res_c)  # covariance of centered residuals
+    Sigma_inv = lw.precision_
+    scores_t = np.einsum("mi,ij,mi->m", res_c, Sigma_inv, res_c)
+    return scores_t, Sigma_inv, mu_t.squeeze(0)
+
+
 def one_sided_quantiles(residuals, alpha_lows, alpha_ups):
     lows = np.array(alpha_lows)
     ups = 1.0 - np.array(alpha_ups)
@@ -234,9 +290,21 @@ def _fold_worker(args):
     """
     fold_id, train_idx, val_idx, outputs, params, device = args
 
-    # pin torch to 1 thread
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
+    # pin torch to 1 thread where possible (some platforms raise if set after parallel work)
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        # If threads have already been configured in this process, ignore
+        pass
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        # On some PyTorch builds you cannot set interop threads after
+        # parallel runtime has been initialized; ignore and continue.
+        pass
+    except Exception:
+        # Catch-all for unexpected issues setting interop threads
+        pass
 
     # initialize model/opt/sched
     model = init_model(device, params, outputs)
@@ -314,7 +382,15 @@ def _fold_worker(args):
 
 
 def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else (
+            "mps"
+            if torch.backends.mps.is_available() and params["batch_size"] > 1000
+            else "cpu"
+        )
+    )
 
     # decide on CPU‐count
     total_cpus = (
@@ -332,9 +408,11 @@ def main():
         for fold_id, (tr_idx, val_idx) in enumerate(splits)
     ]
 
-    # spawn the pool with “spawn”
+    # spawn the pool with "spawn" and initialize workers to set thread limits early
     ctx = mp.get_context("spawn")
-    with ctx.Pool(processes=total_cpus) as pool:
+    n_procs = min(total_cpus, args.folds)
+    print(f"Using {n_procs} worker processes for {args.folds} folds")
+    with ctx.Pool(processes=n_procs, initializer=_init_worker) as pool:
         all_results = pool.map(_fold_worker, fold_args)
 
     # unpack and compute global quantiles just like before
@@ -366,6 +444,7 @@ def main():
         ),  # full architecture
     ]
     upper = lower.copy()
+    latent_maha_cv = None  # Will be set if processing latent space
     for i in range(3):
         resid_pool = np.concatenate(DSD_resid[i], axis=0)
         ql, qh = one_sided_quantiles(
@@ -377,6 +456,27 @@ def main():
 
         lower[i] = rep_DSD[i][np.newaxis, ...] - qh[:, np.newaxis, ...]
         upper[i] = rep_DSD[i][np.newaxis, ...] - ql[:, np.newaxis, ...]
+        
+        # For latent space (i==1), also compute Mahalanobis metrics
+        if i == 1:
+            print("Computing Mahalanobis distance metrics for latent space...")
+            m, n, d = resid_pool.shape  # (total_samples, n_time, latent_dim)
+            results = Parallel(n_jobs=args.n_jobs)(
+                delayed(compute_scores_and_inv)(resid_pool[:, t, :]) for t in range(n)
+            )
+            scores_list, Sigma_inv_list, mu_list = zip(*results)
+            scores = np.stack(scores_list, axis=1)  # (m, n)
+            Sigma_inv = np.stack(Sigma_inv_list, axis=0)  # (n, d, d)
+            mu = np.stack(mu_list, axis=0)  # (n, d)
+            # Compute quantiles of Mahalanobis scores for each alpha and time
+            taus = {}
+            for alpha in alphas:
+                taus[alpha] = np.quantile(scores, 1 - alpha, axis=0)  # (n,)
+            latent_maha_cv = {
+                "Sigma_inv": Sigma_inv,
+                "mu": mu,
+                "taus": taus,
+            }
 
     # mass‐trajectory
     resid_pool = np.concatenate(M_resid, axis=0)
@@ -401,6 +501,7 @@ def main():
                 outputs["idx_test"],
                 (lower, upper, rep_DSD),
                 (lower_m, upper_m, rep_m),
+                latent_maha_cv,  # NEW: Include Mahalanobis metrics for latent space
             ],
             f,
         )

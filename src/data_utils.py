@@ -1,19 +1,23 @@
-import random
 from itertools import combinations_with_replacement
 from pathlib import Path
 
 import numpy as np
 import torch
 import xarray as xr
-from scipy.integrate import odeint, solve_ivp
+from scipy.integrate import solve_ivp
 from scipy.special import binom
-from torch.utils.data import DataLoader, Dataset
 from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset
 
 
 def open_box_dataset():
+    """
+    Open box dataset. Paths are hardcoded but relative.
+
+    :return: X train, mass train, X test, mass test, radius bin edges, number of bins, DSD time
+    """
     # Set path
-    dpath = Path(__file__).parent.parent / "data"
+    dpath = Path(__file__).parent.parent / "data" / "pysdm"
 
     # Train dataset
     ds_all = xr.open_dataset(dpath / "box64_train.nc", decode_timedelta=True)
@@ -39,6 +43,13 @@ def open_box_dataset():
 
 
 def open_erf_dataset(path=None, sample_time=None):
+    """
+    Open ERF dataset. Paths are hardcoded but relative.
+
+    :param path: Optional path to read from different location
+    :param sample_time: Optional specific sample time to read
+    :return: X train, mass train, X test, mass test, radius bin edges, number of bins, DSD time
+    """
     if path is None:
         path = Path(__file__).parent.parent / "data"
         ds_all = xr.open_dataset(path / "congestus_coal_200m_train.nc")
@@ -64,13 +75,15 @@ def open_erf_dataset(path=None, sample_time=None):
     return (x_train, m_train, x_test, m_test, r_bins_edges, n_bins, dsd_time)
 
 
-# define code for taking xarray Dataset and doing train-test split on it
-
-
 def split_by_index(ds: xr.Dataset, dim: str, test_size: float, random_state: int = 0):
     """
     Splits a Dataset along one integer dimension into train/test.
-    Returns (ds_train, idx_train, ds_test, idx_test).
+
+    :param ds: Dataset to split
+    :param dim: Which dimension to split
+    :param test_size: Fraction of dataset to use for testing, between 0 and 1
+    :param random_state: Random state to use for splitting
+    :return: Train data set, train data indices, test data set, test indices
     """
     idx = np.arange(ds.sizes[dim])
     train_idx, test_idx = train_test_split(
@@ -82,8 +95,12 @@ def split_by_index(ds: xr.Dataset, dim: str, test_size: float, random_state: int
 def prepare(ds_sub: xr.Dataset, m_scale: float):
     """
     From a dataset returns (x, m) arrays:
-        x[loc, t, bin] = normalized DSD across bins
-        m[loc, t]      = mass fraction / m_scale
+    x[loc, t, bin] = normalized DSD across bins
+    m[loc, t]      = mass fraction / m_scale
+
+    :param ds_sub: Dataset to prepare
+    :param m_scale: Scaling factor for mass
+    :return: Normalized DSD and mass fraction
     """
     dmdlnr = ds_sub["dmdlnr"]
     # sum over bin → shape (t, loc); then transpose → (loc, t)
@@ -93,21 +110,32 @@ def prepare(ds_sub: xr.Dataset, m_scale: float):
     return x.to_numpy(), (m / m_scale).to_numpy()
 
 
-"""
-Opens any dataset (e.g., RICO or Congestus) and does a specified train(-calibrate-)test split.
-output depends on if a calibration set is specified or not
-"""
-
-
 def open_mass_dataset(
-    name, data_dir, sample_time=None, test_size=0.2, calib_size=None, random_state=1952
+    name,
+    data_dir,
+    filepath=None,
+    sample_time=None,
+    test_size=0.2,
+    calib_size=None,
+    random_state=1952,
+    m_scale=None,
 ):
     """
-    Opens a *.nc named name under data_dir, splits into train/test(/calib),
-    normalizes dmdlnr to get DSD and returns numpy arrays.
+    Open the mass dataset. Primarily used for conformal prediction work.
+
+    :param name: Dataset name
+    :param data_dir: Directory to read data from
+    :param filepath: Used instead name and data_dir
+    :param sample_time: Optional specific sample time to read
+    :param test_size: Fraction of dataset to use for testing, between 0 and 1
+    :param calib_size: Fraction of dataset to use for calibration, between 0 and 1
+    :param random_state: Random state to use for splitting
+    :param m_scale: Scaling factor for mass
+    :return: Dictionary of named outputs
     """
     # 1) load
-    filepath = (data_dir / name).with_suffix(".nc")
+    if filepath is None:
+        filepath = (data_dir / Path(name)).with_suffix(".nc")
     ds = xr.open_dataset(filepath)
 
     # 2) optional subsample in time
@@ -129,16 +157,17 @@ def open_mass_dataset(
         )
 
     # 5) compute global m_scale from full ds_train (before calib‐split)
-    ds_for_scale = (
-        ds_train if ds_calib is None else xr.concat([ds_train, ds_calib], dim="loc")
-    )
-    m_scale = (
-        ds_for_scale["dmdlnr"]
-        .sum(dim="bin")
-        .transpose("loc", "t")
-        .max()
-        .item()  # scalar
-    )
+    if m_scale is None:
+        ds_for_scale = (
+            ds_train if ds_calib is None else xr.concat([ds_train, ds_calib], dim="loc")
+        )
+        m_scale = (
+            ds_for_scale["dmdlnr"]
+            .sum(dim="bin")
+            .transpose("loc", "t")
+            .max()
+            .item()  # scalar
+        )
 
     x_train, m_train = prepare(ds_train, m_scale)
     x_test, m_test = prepare(ds_test, m_scale)
@@ -155,6 +184,7 @@ def open_mass_dataset(
         "r_bins_edges_r": ds["rbin_r"].to_numpy(),
         "n_bins": x_train.shape[-1],
         "dsd_time": ds["t"].to_numpy() - ds["t"].to_numpy()[0],
+        "m_scale": m_scale,
     }
 
     if ds_calib is not None:
@@ -164,18 +194,25 @@ def open_mass_dataset(
     return outputs
 
 
-# use open_mass_dataset to define congestus and RICO data loaders
-
-
 def open_congestus_dataset(
     sample_time=None,
     test_size=0.2,
     calib_size=None,
     random_state=1952,
-    data_dir=Path(__file__).parent.parent / "data",
+    data_dir=Path(__file__).parent.parent / "data" / "erf_data" / "congestus",
 ):
+    """
+    Wrapper for `open_mass_dataset` to specifically open the mass dataset.
+
+    :param sample_time: Optional specific sample time to read
+    :param test_size: Fraction of dataset to use for testing, between 0 and 1
+    :param calib_size: Fraction of dataset to use for calibration, between 0 and 1
+    :param random_state: Random state to use for splitting
+    :param data_dir: Directory to read data from
+    :return: Dictionary of named outputs
+    """
     return open_mass_dataset(
-        name="congestus_coal_200m",
+        name="noadv_coal_200m",
         data_dir=data_dir,
         sample_time=sample_time,
         test_size=test_size,
@@ -189,8 +226,18 @@ def open_rico_dataset(
     test_size=0.2,
     calib_size=None,
     random_state=1952,
-    data_dir=Path(__file__).parent.parent / "data",
+    data_dir=Path(__file__).parent.parent / "data" / "rico",
 ):
+    """
+    Wrapper for `open_mass_dataset` to specifically open the rico dataset.
+
+    :param sample_time: Optional specific sample time to read
+    :param test_size: Fraction of dataset to use for testing, between 0 and 1
+    :param calib_size: Fraction of dataset to use for calibration, between 0 and 1
+    :param random_state: Random state to use for splitting
+    :param data_dir: Directory to read data from
+    :return: Dictionary of named outputs
+    """
     return open_mass_dataset(
         name="rico_coal_200m",
         data_dir=data_dir,
@@ -217,8 +264,10 @@ def open_congestus_calib_train_rico_test(
        x_train, m_train, x_calib, m_calib, x_test, m_test, r_bins, n_bins, dsd_time
     """
     # --- 1) load both datasets
-    cong_path = (data_dir / "congestus_coal_200m").with_suffix(".nc")
-    rico_path = (data_dir / "rico_coal_200m").with_suffix(".nc")
+    cong_path = (data_dir / "erf_data" / "congestus" / "noadv_coal_200m").with_suffix(
+        ".nc"
+    )
+    rico_path = (data_dir / "rico" / "rico_coal_200m").with_suffix(".nc")
 
     ds_cong = xr.open_dataset(cong_path)
     ds_rico = xr.open_dataset(rico_path)
@@ -262,7 +311,6 @@ def open_congestus_calib_train_rico_test(
         "idx_calib": idx_calib,
         "x_test": x_test,
         "m_test": m_test,
-        "idx_test": idx_test,
         "r_bins_edges": r_bins,
         "n_bins": n_bins,
         "dsd_time": dsd_time,
@@ -283,8 +331,10 @@ def open_congestus_train_rico_calib_test(
     4) Returns dict of numpy arrays:
        x_train, m_train, x_calib, m_calib, x_test, m_test, r_bins, n_bins, dsd_time
     """
-    cong_path = (data_dir / "congestus_coal_200m").with_suffix(".nc")
-    rico_path = (data_dir / "rico_coal_200m").with_suffix(".nc")
+    cong_path = (data_dir / "erf_data" / "congestus" / "noadv_coal_200m").with_suffix(
+        ".nc"
+    )
+    rico_path = (data_dir / "rico" / "rico_coal_200m").with_suffix(".nc")
 
     ds_cong = xr.open_dataset(cong_path)
     ds_rico = xr.open_dataset(rico_path)
@@ -321,7 +371,6 @@ def open_congestus_train_rico_calib_test(
     return {
         "x_train": x_train,
         "m_train": m_train,
-        "idx_train": idx_train,
         "x_calib": x_calib,
         "m_calib": m_calib,
         "idx_calib": idx_calib,
@@ -344,10 +393,12 @@ def open_congestus_train_rico_test(
        to the first nt_cong timesteps (default nt_cong=61).
     4) Compute m_scale from congestus only.
     5) Prepare and return numpy arrays:
-       x_train, m_train, x_test, m_test, r_bins_edges, n_bins, dsd_time
+       x_train, m_train, x_test, m_test, r_bins_edges, r_bins_edges_r, n_bins, dsd_time
     """
-    cong_path = (data_dir / "congestus_coal_200m").with_suffix(".nc")
-    rico_path = (data_dir / "rico_coal_200m").with_suffix(".nc")
+    cong_path = (data_dir / "erf_data" / "congestus" / "noadv_coal_200m").with_suffix(
+        ".nc"
+    )
+    rico_path = (data_dir / "rico" / "rico_coal_200m").with_suffix(".nc")
 
     ds_cong = xr.open_dataset(cong_path)
     ds_rico = xr.open_dataset(rico_path)
@@ -381,29 +432,27 @@ def open_congestus_train_rico_test(
     return {
         "x_train": x_train,  # shape: (n_train_loc, nt, n_bins)
         "m_train": m_train,  # shape: (n_train_loc, nt)
-        "idx_train": idx_train,
         "x_test": x_test,  # shape: (n_test_loc,  nt, n_bins)
         "m_test": m_test,  # shape: (n_test_loc,  nt)
-        "idx_test": idx_test,
         "r_bins_edges": r_bins_edges,  # 1D array, length = n_bins+1 or n_bins
         "n_bins": n_bins,
         "dsd_time": dsd_time,  # 1D array, length = nt
     }
 
 
-"""
-The following function generates indices for the bootstrap replicate of a provided training dataset.
-In other words, it resamples the sample indices with replacement.
-"""
-
-
 def resampled_indices(test_data):
     return np.random.randint(0, len(test_data), size=len(test_data))
 
 
-# Create torch dataset
 class NormedBinDatasetDzDt(Dataset):
     def __init__(self, dmdlnr_normed, dsd_time, M):
+        """
+        Normed binned dataset pytorch class
+
+        :param dmdlnr_normed: Original normed dmdlnr data
+        :param dsd_time: Time
+        :param M: Mass
+        """
         self.nbin = dmdlnr_normed.shape[2]
         self.t = dsd_time
         self.dt = self.t[1] - self.t[0]
@@ -420,9 +469,15 @@ class NormedBinDatasetDzDt(Dataset):
         return self.x[idx, :], self.dx[idx, :], self.M[idx]
 
 
-# Create torch dataset
 class NormedBinDatasetAR(Dataset):
     def __init__(self, dmdlnr_normed, M, lag=1):
+        """
+        Normed binned dataset pytorch class for AR model
+
+        :param dmdlnr_normed: Original normed dmdlnr data
+        :param M: Mass
+        :param lag: Lags to use for AR model
+        """
         self.nbin = dmdlnr_normed.shape[2]
         self.lag = lag
         self.bin0 = (
@@ -449,412 +504,15 @@ class NormedBinDatasetAR(Dataset):
         return self.bin0[idx, :], self.bin1[idx, :], self.M[idx]
 
 
-# Utilities for training CNN on 1-channel and 2-channel data from 1d KiD runs
-class BinDataset1C(Dataset):
-    def __init__(self, data):
-        self.bin0 = data
-
-    def __len__(self):
-        return int(self.bin0.shape[0])
-
-    def __getitem__(self, idx):
-        return self.bin0[idx, :]
-
-
-class BinDataset2C(Dataset):
-    def __init__(self, data):
-        self.bin0 = data
-
-    def __len__(self):
-        return int(self.bin0.shape[0])
-
-    def __getitem__(self, idx):
-        return self.bin0[idx, :, :]
-
-
-class BinThermoDataset1C(Dataset):
-    def __init__(self, dmdlnr, qv, T, dx, dqv_cond):
-        self.bin0 = dmdlnr.astype(np.float32)
-        self.qv = qv.astype(np.float32)
-        self.T = T.astype(np.float32)
-        self.dx = dx.astype(np.float32)
-        self.dqv_cond = dqv_cond.astype(np.float32)
-
-    def __len__(self):
-        return int(self.bin0.shape[0])
-
-    def __getitem__(self, idx):
-        return (
-            self.bin0[idx, :],
-            self.qv[idx],
-            self.T[idx],
-            self.dx[idx],
-            self.dqv_cond[idx],
-        )
-
-
-def normalize_data_1d(bin0):
-    # data QC
-    N_threshold = [0.1 * 1e6, 1e13]  # 0.1 - 10,000 / cm^3
-    M_threshold = (1e-9, 1e16)  # 0.01 - 10 g / m^3
-    casemask = np.zeros(bin0.shape[0])
-    case_idx = np.arange(0, bin0.shape[0], 1)
-    binsums = np.sum(bin0, axis=2)
-    for i in range(0, bin0.shape[0]):
-        if np.any(bin0[i, 0, :] > N_threshold[1]) or np.any(
-            bin0[i, 1, :] > M_threshold[1]
-        ):
-            casemask[i] = False
-        elif binsums[i, 0] < N_threshold[0] or binsums[i, 1] < M_threshold[0]:
-            casemask[i] = False
-        else:
-            casemask[i] = True
-    bin0 = bin0[casemask == 1.0, :]
-    case_idx = case_idx[casemask == 1.0]
-
-    # Normalization?
-    binsums = np.sum(bin0, axis=2)
-    momscales = np.max(binsums, axis=0)
-    bin0[:, 0, :] /= momscales[0]
-    bin0[:, 1, :] /= momscales[1]
-
-    return (bin0, case_idx)
-
-
-def create_timeseries_dataloader(ds):
-    bs = ds["time_save_spec"].size
-    (data_loader, _, _, t_idx) = create_dataloader(
-        None, bs, tvt_split=(100, 0, 0), shuffle=False, ds=ds, return_idx=True
-    )
-    return (data_loader, t_idx)
-
-
-def create_dataloader(
-    filepath,
-    bs,
-    tvt_split=(80, 10, 10),
-    shuffle=True,
-    ds=None,
-    return_idx=False,
-    erf=False,
-):
-    if filepath is not None:
-        ds = xr.open_mfdataset(filepath + "*.nc", combine="nested", concat_dim="run")
-        r_bins_edges = np.logspace(
-            np.log10(0.1 * 1e-6),
-            np.log10(10 * 1e-3),
-            101,
-            endpoint=True,
-        )
-
-        # flatten the data
-        data = ds.stack(case=("run", "time_save_spec", "height"))
-    else:
-        assert ds is not None
-        data = ds.stack(case=("time_save_spec",))
-
-    nc = data["case"].size
-    nb = data["wet_spectrum_bin_index"].size
-
-    bin0 = np.zeros((nc, 2, nb))
-    bin0[:, 0, :] = data["wet spectrum"].to_numpy().T
-    bin0[:, 1, :] = data["dvdlnr"].to_numpy().T
-
-    # mean distributions
-    (bin0, case_idx) = normalize_data_1d(bin0)
-
-    ncase, _, nb = bin0.shape
-    print(f"Found {ncase} samples out of {nc}")
-
-    # Test-train split
-    assert sum(tvt_split) == 100
-    assert tvt_split[0] > 0
-    idx = np.arange(0, bin0.shape[0])
-    if shuffle:
-        np.random.seed(42)
-        np.random.shuffle(idx)
-
-    # Train
-    trainidx = idx[0 : int(tvt_split[0] / 100 * bin0.shape[0])]
-    bin0_train = bin0[trainidx, :]
-    traindataset = BinDataset2C(bin0_train)
-    train_dataloader = DataLoader(traindataset, batch_size=bs)
-
-    # Validate
-    if tvt_split[1] > 0:
-        validx = idx[
-            int(tvt_split[0] / 100 * bin0.shape[0]) : int(
-                sum(tvt_split[0:1]) / 100 * bin0.shape[0]
-            )
-        ]
-        bin0_val = bin0[validx, :]
-        valdataset = BinDataset2C(bin0_val)
-        val_dataloader = DataLoader(valdataset, batch_size=bs)
-    else:
-        val_dataloader = None
-
-    # Testing
-    if tvt_split[2] > 0:
-        testidx = idx[int(sum(tvt_split[0:1]) / 100 * bin0.shape[0])]
-        bin0_test = bin0[testidx, :]
-        testdataset = BinDataset2C(bin0_test)
-        test_dataloader = DataLoader(testdataset, batch_size=bs)
-    else:
-        test_dataloader = None
-
-    print(
-        "train ",
-        int(tvt_split[0] / 100 * bin0.shape[0]),
-        "val ",
-        int(tvt_split[1] / 100 * bin0.shape[0]),
-        "test ",
-        int(tvt_split[2] / 100 * bin0.shape[0]),
-    )
-    if return_idx:
-        return (train_dataloader, test_dataloader, val_dataloader, case_idx)
-    else:
-        return (train_dataloader, test_dataloader, val_dataloader)
-
-
-def find_last_nonzero_index_along_dim(data_array, dim):
-    non_zero_indices = xr.apply_ufunc(
-        lambda arr: np.nonzero(arr)[0][-1] if np.any(arr) else -1,
-        data_array,
-        input_core_dims=[[dim]],
-        vectorize=True,
-    )
-    return non_zero_indices
-
-
-def create_erf_dataloader(
-    ds,
-    cnn=False,
-    shuffle_runs=True,
-    shuffle_data=False,
-    normx=True,
-    batch_size=100,
-    tvt_split=(80, 10, 10),
-    ql_lim=1e-4,
-    rmax_lim=20e-6,
-):
-    ds = ds.stack(run=("x", "y", "z", "rst"))
-    ds["ql"] = ds["qc"] + ds["qr"]
-    t = ds["t"].to_numpy()
-
-    # filter out areas where there isn't enough cloud
-    ql_filter = ds["ql"].isel(t=0) >= ql_lim
-    ql_filter = ql_filter.broadcast_like(ds["qc"])
-    r_filter = (
-        ds["radius_bin"][
-            find_last_nonzero_index_along_dim(ds["dmdlnr"].isel(t=0), "radius_bin")
-        ]
-        >= rmax_lim
-    )
-    r_filter = r_filter.broadcast_like(ds["qc"]).drop("radius_bin")
-    total_filter = ql_filter & r_filter
-    ds_filtered = ds.where(total_filter.broadcast_like(ds["qc"]), drop=True)
-
-    x = ds_filtered["dmdlnr"].transpose("run", "t", "radius_bin").to_numpy()
-    print(f"{x.shape[0]} runs with {x.shape[1]} timesteps each")
-
-    qv = ds_filtered["qv"].transpose("run", "t").to_numpy()
-    ql = ds_filtered["ql"].transpose("run", "t").to_numpy()
-    T = ds_filtered["temp"].transpose("run", "t").to_numpy()
-
-    dt = (ds["t"].isel(t=1) - ds["t"].isel(t=0)).item()
-    dx = np.gradient(x, axis=1) / dt
-    dql = np.gradient(ql, axis=1) / dt
-
-    if normx:
-        # x_norm = np.max(x)
-        x_norm = np.percentile(x, 98)
-        qv_range = (np.min(qv), np.max(qv))
-        T_range = (np.min(T), np.max(T))
-    else:
-        x_norm = 1
-        qv_range = (0, 1)
-        T_range = (0, 1)
-
-    x = x / x_norm
-    dx = dx / x_norm
-    qv = (qv - qv_range[0]) / (qv_range[1] - qv_range[0])
-    dqv = dql / (qv_range[1] - qv_range[0])
-    T = (T - T_range[0]) / (T_range[1] - T_range[0])
-
-    x_data = x.copy()
-    dx_data = dx.copy()
-    qv_data = qv.copy()
-    dqv_data = dqv.copy()
-    T_data = T.copy()
-
-    if shuffle_runs:
-        shuffle_idx = np.arange(len(ds_filtered["run"]))
-        random.shuffle(shuffle_idx)
-        x = x[shuffle_idx, :, :]
-        dx = dx[shuffle_idx, :, :]
-        qv = qv[shuffle_idx, :]
-        dqv = dqv[shuffle_idx, :]
-        T = T[shuffle_idx, :]
-
-    if shuffle_data:
-        shuffle_idx = np.arange(len(ds_filtered["run"]))
-        random.shuffle(shuffle_idx)
-        x_data = x_data[shuffle_idx, :, :]
-        dx_data = dx_data[shuffle_idx, :, :]
-        qv_data = qv_data[shuffle_idx, :]
-        dqv_data = dqv_data[shuffle_idx, :]
-        T_data = T_data[shuffle_idx, :]
-
-    if cnn:
-        old_shape = x.shape
-        x = x.reshape((old_shape[0] * old_shape[1], 1, old_shape[2]))
-        dx = dx.reshape(x.shape)
-        qv = qv.reshape(qv.shape[0] * qv.shape[1], 1)
-        dqv = dqv.reshape(dqv.shape[0] * dqv.shape[1], 1)
-        T = T.reshape(T.shape[0] * T.shape[1], 1)
-
-    # Train
-    id_train = int(tvt_split[0] / 100 * x.shape[0])
-    traindataset = BinThermoDataset1C(
-        x[0:id_train], qv[0:id_train], T[0:id_train], dx[0:id_train], dqv[0:id_train]
-    )
-    train_dataloader = DataLoader(traindataset, batch_size=batch_size)
-
-    # Validate
-    if tvt_split[1] > 0:
-        id_val = int(sum(tvt_split[0:2]) / 100 * x.shape[0])
-        valdataset = BinThermoDataset1C(
-            x[id_train:id_val],
-            qv[id_train:id_val],
-            T[id_train:id_val],
-            dx[id_train:id_val],
-            dqv[id_train:id_val],
-        )
-        val_dataloader = DataLoader(valdataset, batch_size=batch_size)
-    else:
-        val_dataloader = None
-    #
-    # # Testing
-    # if tvt_split[2] > 0:
-    #     x_test = x[int(sum(tvt_split[0:2])/100 * x.shape[0]):]
-    #     testdataset = BinThermoDataset1C(x_test)
-    #     test_dataloader = DataLoader(testdataset, batch_size=batch_size)
-    # else:
-    #     test_dataloader = None
-
-    data = (x_data, qv_data, T_data, dx_data, dqv_data, t)
-    norms = (x_norm, qv_range, T_range)
-    data_loaders = (train_dataloader, val_dataloader)  # , test_dataloader)
-
-    return (data, norms, data_loaders)
-
-
-# Utilities for end-to-end training of box model
-class E2EDataset(Dataset):
-    def __init__(self, x, dx):
-        self.x = x
-        self.dx = dx
-
-    def __len__(self):
-        return int(self.x.shape[0])
-
-    def __getitem__(self, idx):
-        return (self.x[idx, :, :], self.dx[idx, :, :])
-
-
-def create_e2e_dataloader(
-    ds,
-    cnn=False,
-    shuffle_runs=True,
-    normx=True,
-    normdx=True,
-    batch_size=100,
-    tvt_split=(80, 10, 10),
-    condensation=False,
-    seed=None,
-):
-    one_sec = np.timedelta64(1, "s")
-    t = (ds["time"] / one_sec).to_numpy()
-    dt = int((ds["time"].isel(time=1) - ds["time"].isel(time=0)) / one_sec)
-    x = ds["dvdlnr"].transpose("run", "time", "mass_bin_idx").to_numpy()
-    if condensation:
-        supersat = (ds["RH"] - 1) / 100
-        temp = ds["T"]
-
-    dx = np.gradient(x, axis=1) / dt
-
-    if normx:
-        x_norm = np.max(x)
-    else:
-        x_norm = 1.0
-
-    if normdx:
-        dx_norm = np.max(dx)
-        t_norm = x_norm / dx_norm
-    else:
-        t_norm = 1.0
-
-    x = x / x_norm
-    dx = dx / x_norm * t_norm
-    t = t / t_norm
-
-    x_data = x.copy()
-    dx_data = dx.copy()
-
-    if shuffle_runs:
-        if seed:
-            random.seed(seed)
-        shuffle_idx = ds["run"].data
-        random.shuffle(shuffle_idx)
-        x = x[shuffle_idx, :, :]
-        dx = dx[shuffle_idx, :, :]
-
-    if cnn:
-        old_shape = x.shape
-        print(f"{old_shape[0]} runs with {old_shape[1]} timesteps each")
-        x = x.reshape((old_shape[0] * old_shape[1], 1, old_shape[2]))
-        dx = dx.reshape(x.shape)
-
-    # Train
-    x_train = x[0 : int(tvt_split[0] / 100 * x.shape[0])]
-    dx_train = dx[0 : int(tvt_split[0] / 100 * x.shape[0])]
-    traindataset = E2EDataset(x_train, dx_train)
-    train_dataloader = DataLoader(traindataset, batch_size=batch_size)
-
-    # Validate
-    if tvt_split[1] > 0:
-        x_val = x[
-            int(tvt_split[0] / 100 * x.shape[0]) : int(
-                sum(tvt_split[0:2]) / 100 * x.shape[0]
-            )
-        ]
-        dx_val = dx[
-            int(tvt_split[0] / 100 * x.shape[0]) : int(
-                sum(tvt_split[0:2]) / 100 * x.shape[0]
-            )
-        ]
-        valdataset = E2EDataset(x_val, dx_val)
-        val_dataloader = DataLoader(valdataset, batch_size=batch_size)
-    else:
-        val_dataloader = None
-
-    # Testing
-    if tvt_split[2] > 0:
-        x_test = x[int(sum(tvt_split[0:2]) / 100 * x.shape[0]) :]
-        dx_test = dx[int(sum(tvt_split[0:2]) / 100 * x.shape[0]) :]
-        testdataset = E2EDataset(x_test, dx_test)
-        test_dataloader = DataLoader(testdataset, batch_size=batch_size)
-    else:
-        test_dataloader = None
-
-    data = (x_data, dx_data, t)
-    norms = (x_norm, t_norm)
-    data_loaders = (train_dataloader, val_dataloader, test_dataloader)
-
-    return (data, norms, data_loaders)
-
-
 def sindy_library_tensor(z, latent_dim, poly_order):
+    """
+    Create SINDy "library" tensor
+
+    :param z: Latent variables
+    :param latent_dim: Latent dimension
+    :param poly_order: Polynomial order used in SINDy
+    :return: Matrix representing SINDy library
+    """
     library_dim = library_size(latent_dim, poly_order)
     if len(z.shape) == 1:
         z = z.unsqueeze(0)
@@ -892,40 +550,30 @@ def sindy_library_tensor(z, latent_dim, poly_order):
 
 
 def library_size(n, poly_order):
+    """
+    Calculate size of SINDy library
+
+    :param n:
+    :param poly_order: Polynomial order used in SINDy
+    :return: SINDy library size
+    """
     l = 0
     for k in range(poly_order + 1):
         l += int(binom(n + k - 1, k))
     return l
 
 
-"""
-ODE solutions
-"""
-
-
-def first_order_dt(t, z, sindy_coeffs, poly_order, z_lim):
-    # z has shape (n_latent)
-    n_latent = z.size
-    library = sindy_library_tensor(
-        torch.tensor(z).reshape(1, 1, n_latent), n_latent, poly_order
-    )
-    dz = torch.matmul(library, sindy_coeffs.T)[0][0].detach().numpy()
-    for il in range(n_latent):
-        if z[il] >= z_lim[il][1]:
-            dz[il] = 0.0
-        elif z[il] <= z_lim[il][0]:
-            dz[il] = 0.0
-
-    return dz
-
-
-def sindy_simulate(z0, T, sindy_coeffs, poly_order, z_lim):
-    f = lambda z, t: first_order_dt(t, z, sindy_coeffs, poly_order, z_lim)
-    Z = odeint(f, z0, T)
-    return Z
-
-
 def simulate(z0, T, dz_network, z_lim):
+    """
+    Simulate the DSD evolution using the latent space predictions
+
+    :param z0: Initial latent variables
+    :param T: Time
+    :param dz_network: Network to calculate dz
+    :param z_lim:
+    :return:
+    """
+
     def f(t, z):
         n_latent = z.size
         dz = dz_network(torch.Tensor(z)).squeeze().detach().numpy()
@@ -939,57 +587,42 @@ def simulate(z0, T, dz_network, z_lim):
     return Z
 
 
-def calculate_autocorrelation(dsd_data, max_lag=10):
-    # Create an empty array to store results
-    # We'll use lag=0 to n_lag
-    autocorr = np.zeros((dsd_data.shape[0], max_lag + 1))
+def simulate_damped(z0, T, dz_network, eps, p):
+    """
+    z0: (D,) initial state (latent L plus mass 1)
+    T:  (T,) time grid
+    dz_network: callable taking torch tensor (1, D) or (D,) -> returning (1, D) or (D,)
+    eps: damping coefficient (>0)
+    p:   odd integer exponent (e.g., 3, 5)
+    """
+    z0 = np.asarray(z0, dtype=float)
+    D = z0.shape[0]
 
-    # For each run, calculate autocorrelation
-    for r in range(dsd_data.shape[0]):
-        run_data = dsd_data[r]
+    if p <= 0 or p % 2 == 0:
+        raise ValueError("p must be a positive odd integer")
 
-        # For each lag value
-        for lag in range(max_lag + 1):
-            if lag == 0:
-                # At lag 0, we're correlating the signal with itself
-                # This should equal 1 if normalized
-                corr_sum = 0
-                for t in range(dsd_data.shape[1]):
-                    # Calculate correlation across the bin dimension
-                    x = run_data[t]
-                    # Normalize by subtracting mean and dividing by std
-                    x_norm = (x - np.mean(x)) / (
-                        np.std(x) + 1e-10
-                    )  # Adding small epsilon to avoid division by zero
-                    corr_sum += 1  # Perfect correlation with itself
-                autocorr[r, lag] = corr_sum / dsd_data.shape[1]
-            else:
-                # For other lags, we correlate shifted versions
-                corr_sum = 0
-                count = 0
-                for t in range(dsd_data.shape[1] - lag):
-                    # Get data for current time point and lagged time point
-                    x1 = run_data[t]
-                    x2 = run_data[t + lag]
+    def f(t, z):
+        # evaluate network derivative
+        dz = dz_network(torch.as_tensor(z, dtype=torch.float32).unsqueeze(0))
+        dz = np.asarray(dz.detach().cpu().numpy()).ravel()
+        if dz.shape[0] != D:
+            raise ValueError(
+                f"dz_network returned length {dz.shape[0]} but expected {D}"
+            )
 
-                    # Normalize
-                    x1_norm = (x1 - np.mean(x1)) / (np.std(x1) + 1e-10)
-                    x2_norm = (x2 - np.mean(x2)) / (np.std(x2) + 1e-10)
+        # apply damping to *all* coordinates (latent and mass)
+        dz -= eps * z * (np.abs(z) ** (p - 1))
+        return dz
 
-                    # Calculate correlation (dot product of normalized vectors)
-                    corr = np.sum(x1_norm * x2_norm) / len(x1)
-                    corr_sum += corr
-                    count += 1
-
-                if count > 0:
-                    autocorr[r, lag] = corr_sum / count
-
-    return autocorr
+    sol = solve_ivp(f, [float(T[0]), float(T[-1])], z0, method="LSODA", t_eval=T)
+    return sol.y.T
 
 
 def champion_calculate_weights(ds, lambda1_metaweight=0.5, lambda3=1.0):
     """
-    See Champion et al. supplementary materials for information.
+    Calculate weights (lambdas) for loss terms.
+    See Champion et al. supplementary materials for information on how these
+    are calculated.
 
     :param ds: Training dataset
     :param lambda1_metaweight: lambda1 is specified as "slightly less than", this sets that
